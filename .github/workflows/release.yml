@@ -1,0 +1,190 @@
+name: Create Release & Upload Assets
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.9)'
+        required: true
+        type: string
+
+jobs:
+  release:
+    name: Release ${{ github.event.inputs.tag || github.ref_name }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Agent binaries
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: leassh-agent
+            asset_name: leassh-agent-linux-x64
+            build_dir: ./agent
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: leassh-agent
+            asset_name: leassh-agent-linux-arm64
+            build_dir: ./agent
+          - target: aarch64-apple-darwin
+            os: macos-14
+            artifact_name: leassh-agent
+            asset_name: leassh-agent-darwin-arm64
+            build_dir: ./agent
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            artifact_name: leassh-agent.exe
+            asset_name: leassh-agent-windows-x64
+            build_dir: ./agent
+          # Server binaries
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: leassh
+            asset_name: leassh-server-linux-x64
+            build_dir: ./server
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: leassh
+            asset_name: leassh-server-linux-arm64
+            build_dir: ./server
+          - target: aarch64-apple-darwin
+            os: macos-14
+            artifact_name: leassh
+            asset_name: leassh-server-darwin-arm64
+            build_dir: ./server
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            artifact_name: leassh.exe
+            asset_name: leassh-server-windows-x64
+            build_dir: ./server
+
+    steps:
+      - name: Checkout leassh source at tag
+        uses: actions/checkout@v4
+        with:
+          repository: cgoberg/leassh
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          path: leassh-src
+
+      - name: Checkout releases repo
+        uses: actions/checkout@v4
+        with:
+          path: releases-repo
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: releases-${{ matrix.target }}-${{ matrix.build_dir }}
+
+      - name: Install cross (for Linux ARM)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cargo install cross --locked
+
+      - name: Install MinGW (for Windows cross-compile)
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build binary
+        working-directory: leassh-src${{ matrix.build_dir }}
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Create archive (Unix)
+        if: runner.os != 'Windows'
+        working-directory: leassh-src
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+
+      - name: Create archive (Windows)
+        if: runner.os == 'Windows'
+        working-directory: leassh-src
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.asset_name }}.zip ${{ matrix.artifact_name }}
+
+      - name: Build LeasshCapture.app (macOS agent only)
+        if: matrix.build_dir == './agent' && startsWith(matrix.os, 'macos-')
+        working-directory: leassh-src
+        run: |
+          agent/macos/build-capture.sh agent/macos/build
+
+      - name: Create or find release
+        id: release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const tag = process.env.TAG_NAME;
+            const { data: releases } = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag
+            });
+            let releaseId;
+            if (releases.length > 0) {
+              releaseId = releases[0].id;
+              console.log('Found existing release:', releaseId);
+            } else {
+              const result = await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag,
+                name: tag,
+                draft: false,
+                prerelease: false
+              });
+              releaseId = result.data.id;
+              console.log('Created new release:', releaseId);
+            }
+            return releaseId;
+        env:
+          TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Upload asset (Unix)
+        if: runner.os != 'Windows'
+        working-directory: leassh-src
+        run: |
+          ASSET="${{ matrix.asset_name }}.tar.gz"
+          RELEASE_ID="${{ steps.release.outputs.result }}"
+          if [ -f "$ASSET" ]; then
+            curl --fail-with-body -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$ASSET" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=$ASSET"
+            echo "Uploaded $ASSET"
+          else
+            echo "ERROR: $ASSET not found" && exit 1
+          fi
+
+      - name: Upload asset (Windows)
+        if: runner.os == 'Windows'
+        working-directory: leassh-src
+        run: |
+          $ASSET="${{ matrix.asset_name }}.zip"
+          $RELEASE_ID="${{ steps.release.outputs.result }}"
+          if (Test-Path $ASSET) {
+            curl --fail-with-body -X POST `
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" `
+              -H "Content-Type: application/octet-stream" `
+              --data-binary "@$ASSET" `
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=$ASSET"
+            echo "Uploaded $ASSET"
+          } else {
+            echo "ERROR: $ASSET not found"
+            exit 1
+          }
