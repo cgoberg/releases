@@ -33,7 +33,7 @@ jobs:
             asset_name: leassh-agent-linux-arm64
             build_dir: ./agent
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             artifact_name: leassh-agent
             asset_name: leassh-agent-darwin-arm64
             build_dir: ./agent
@@ -54,7 +54,7 @@ jobs:
             asset_name: leassh-server-linux-arm64
             build_dir: ./server
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             artifact_name: leassh
             asset_name: leassh-server-darwin-arm64
             build_dir: ./server
