@@ -130,17 +130,17 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const tag = process.env.TAG_NAME;
-            const { data: releases } = await github.rest.repos.listReleases({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: tag
-            });
-            let releaseId;
-            if (releases.length > 0) {
-              releaseId = releases[0].id;
-              console.log('Found existing release:', releaseId);
-            } else {
-              const result = await github.rest.repos.createRelease({
+            try {
+              const { data: release } = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag
+              });
+              console.log('Found existing release:', release.id);
+              return release.id;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              const { data: release } = await github.rest.repos.createRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 tag_name: tag,
@@ -148,25 +148,22 @@ jobs:
                 draft: false,
                 prerelease: false
               });
-              releaseId = result.data.id;
-              console.log('Created new release:', releaseId);
+              console.log('Created new release:', release.id);
+              return release.id;
             }
-            return releaseId;
         env:
           TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Upload asset (Unix)
         if: runner.os != 'Windows'
         working-directory: leassh-src
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           ASSET="${{ matrix.asset_name }}.tar.gz"
-          RELEASE_ID="${{ steps.release.outputs.result }}"
           if [ -f "$ASSET" ]; then
-            curl --fail-with-body -X POST \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary "@$ASSET" \
-              "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=$ASSET"
+            gh release upload "$TAG_NAME" "$ASSET" --repo "$GITHUB_REPOSITORY" --clobber
             echo "Uploaded $ASSET"
           else
             echo "ERROR: $ASSET not found" && exit 1
@@ -175,15 +172,13 @@ jobs:
       - name: Upload asset (Windows)
         if: runner.os == 'Windows'
         working-directory: leassh-src
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           $ASSET="${{ matrix.asset_name }}.zip"
-          $RELEASE_ID="${{ steps.release.outputs.result }}"
           if (Test-Path $ASSET) {
-            curl --fail-with-body -X POST `
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" `
-              -H "Content-Type: application/octet-stream" `
-              --data-binary "@$ASSET" `
-              "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=$ASSET"
+            gh release upload "$env:TAG_NAME" "$ASSET" --repo "$env:GITHUB_REPOSITORY" --clobber
             echo "Uploaded $ASSET"
           } else {
             echo "ERROR: $ASSET not found"
