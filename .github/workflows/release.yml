@@ -70,6 +70,7 @@ jobs:
         with:
           repository: cgoberg/leassh
           ref: ${{ github.event.inputs.tag || github.ref_name }}
+          token: ${{ secrets.LEASSH_SOURCE_TOKEN }}
           path: leassh-src
 
       - name: Checkout releases repo
